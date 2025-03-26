@@ -1,5 +1,6 @@
 package com.programminghut.realtime_object
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
@@ -28,13 +29,13 @@ class MainActivity : AppCompatActivity() {
         Color.BLUE, Color.GREEN, Color.RED, Color.CYAN, Color.GRAY, Color.BLACK,
         Color.DKGRAY, Color.MAGENTA, Color.YELLOW, Color.RED)
     val paint = Paint()
-    lateinit var imageProcessor: ImageProcessor
+    lateinit var imageProcessor:ImageProcessor
     lateinit var bitmap:Bitmap
-    lateinit var imageView: ImageView
-    lateinit var cameraDevice: CameraDevice
-    lateinit var handler: Handler
-    lateinit var cameraManager: CameraManager
-    lateinit var textureView: TextureView
+    lateinit var imageView:ImageView
+    lateinit var cameraDevice:CameraDevice
+    lateinit var handler:Handler
+    lateinit var cameraManager:CameraManager
+    lateinit var textureView:TextureView
     lateinit var model:SsdMobilenetV11Metadata1
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -100,7 +101,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
 
     }
 
@@ -141,8 +142,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     fun get_permission(){
-        if(ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED){
-            requestPermissions(arrayOf(android.Manifest.permission.CAMERA), 101)
+        if(ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED){
+            requestPermissions(arrayOf(Manifest.permission.CAMERA), 101)
         }
     }
     override fun onRequestPermissionsResult(
