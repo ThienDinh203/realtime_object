@@ -12,6 +12,9 @@ import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
+import android.renderscript.Element
+import android.util.Log
 import android.view.Surface
 import android.view.TextureView
 import android.widget.ImageView
@@ -23,6 +26,13 @@ import org.tensorflow.lite.support.common.FileUtil
 import org.tensorflow.lite.support.image.ImageProcessor
 import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.image.ops.ResizeOp
+
+import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceDetectorOptions
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.face.Face
+import android.graphics.Rect
+
 
 class MainActivity : AppCompatActivity() {
 
@@ -39,6 +49,16 @@ class MainActivity : AppCompatActivity() {
     lateinit var cameraManager:CameraManager
     lateinit var textureView:TextureView
     lateinit var model:Model
+    private var isNotifying = false
+    private val notifyThreshold = 0.5f
+    private val probabilityWindow = mutableListOf<Float>()
+    private val smoothingWindowSize = 10 // average over last 10 frames
+    private val highThreshold = 0.7f
+    private var drowsyStartTime: Long = 0
+    private val drowsyDurationThreshold = 2000L // 2 seconds
+
+// lateinit var mediaPlayer: MediaPlayer
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -50,8 +70,8 @@ class MainActivity : AppCompatActivity() {
             .add(ResizeOp(224, 224, ResizeOp.ResizeMethod.BILINEAR))
             .build()
 
-//        imageProcessor = ImageProcessor.Builder().add(ResizeOp(224, 224, ResizeOp.ResizeMethod.BILINEAR)).build()
-//        model = SsdMobilenetV11Metadata1.newInstance(this)
+// imageProcessor = ImageProcessor.Builder().add(ResizeOp(224, 224, ResizeOp.ResizeMethod.BILINEAR)).build()
+// model = SsdMobilenetV11Metadata1.newInstance(this)
         model = Model.newInstance(this)
         val handlerThread = HandlerThread("videoThread")
         handlerThread.start()
@@ -71,18 +91,22 @@ class MainActivity : AppCompatActivity() {
                 return false
             }
             override fun onSurfaceTextureUpdated(p0: SurfaceTexture) {
-//                bitmap = textureView.bitmap!!
-//                var image = TensorImage.fromBitmap(bitmap)
-//                image = imageProcessor.process(image)
+// bitmap = textureView.bitmap!!
+// var image = TensorImage.fromBitmap(bitmap)
+// image = imageProcessor.process(image)
+                val startTime = System.currentTimeMillis()
+
                 bitmap = textureView.bitmap!!
-                var image = TensorImage(DataType.FLOAT32)  // Sử dụng FLOAT32 thay vì mặc định
+                var image = TensorImage(DataType.FLOAT32) // Sử dụng FLOAT32 thay vì mặc định
                 image.load(bitmap)
                 image = imageProcessor.process(image)
 
                 val tensorBuffer = image.tensorBuffer
-
                 val outputs = model.process(tensorBuffer)
                 val probability = outputs.outputFeature0AsTensorBuffer.floatArray[0]
+
+                val endTime = System.currentTimeMillis() // End timing
+                val delay = endTime - startTime
 
                 var mutable = bitmap.copy(Bitmap.Config.ARGB_8888, true)
                 val canvas = Canvas(mutable)
@@ -92,53 +116,58 @@ class MainActivity : AppCompatActivity() {
                 paint.textSize = h / 15f
                 paint.strokeWidth = h / 85f
 
-                // Thiết lập màu và kiểu chữ
+                val status = if (probability > 0.5) "Drowsy" else "Awake"
                 paint.color = if (probability > 0.5) Color.RED else Color.GREEN
+
+                // 1. Add probability to sliding window and compute average
+                probabilityWindow.add(probability)
+                if (probabilityWindow.size > smoothingWindowSize) {
+                    probabilityWindow.removeAt(0)
+                }
+                val averageProbability = probabilityWindow.average().toFloat()
+
+// 2. Determine state using smoothed average and higher threshold
+                val isDrowsy = averageProbability > highThreshold
+                val currentTime = System.currentTimeMillis()
+
+// 3. Track duration of drowsy state
+                if (isDrowsy) {
+                    if (drowsyStartTime == 0L) {
+                        drowsyStartTime = currentTime
+                    }
+                } else {
+                    drowsyStartTime = 0L
+                }
+
+                val sustainedDrowsy = drowsyStartTime != 0L && (currentTime - drowsyStartTime >= drowsyDurationThreshold)
+
+//                val status = if (sustainedDrowsy) "Drowsy" else "Awake"
+//                paint.color = if (sustainedDrowsy) Color.RED else Color.GREEN
+
                 paint.style = Paint.Style.FILL
 
-                // Vẽ văn bản hiển thị xác suất hoặc trạng thái
-                val status = if (probability > 0.5) "Drowsy" else "Awake"
-                canvas.drawText("$status: ${(probability * 100).toInt()}%", 50f, 100f, paint)
+                canvas.drawText("$status: ${(averageProbability * 100).toInt()}%", 50f, 100f, paint)
 
+                paint.color = Color.WHITE
+                paint.textSize = h / 50f
+                canvas.drawText("Delay: ${delay}ms", 50f, 150f, paint)
+                Log.d("InferenceTime", "Model inference delay: ${delay}ms")
+
+                if (sustainedDrowsy && !isNotifying) {
+                    isNotifying = true
+
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        if (probability > notifyThreshold) {
+                        // if (!mediaPlayer.isPlaying) {
+                        // mediaPlayer.start()
+                        // }
+                            Log.d("DrowsyWarning", "Warning Sleep! $status: ${(probability * 100).toInt()}%")
+                        }
+                        isNotifying = false
+                    }, 1500)
+                }
                 imageView.setImageBitmap(mutable)
             }
-
-
-//            override fun onSurfaceTextureUpdated(p0: SurfaceTexture) {
-//                bitmap = textureView.bitmap!!
-//                var image = TensorImage.fromBitmap(bitmap)
-//                image = imageProcessor.process(image)
-//
-//                val outputs = model.process(image)
-//                val locations = outputs.locationsAsTensorBuffer.floatArray
-//                val classes = outputs.classesAsTensorBuffer.floatArray
-//                val scores = outputs.scoresAsTensorBuffer.floatArray
-//                val numberOfDetections = outputs.numberOfDetectionsAsTensorBuffer.floatArray
-//
-//                var mutable = bitmap.copy(Bitmap.Config.ARGB_8888, true)
-//                val canvas = Canvas(mutable)
-//
-//                val h = mutable.height
-//                val w = mutable.width
-//                paint.textSize = h/15f
-//                paint.strokeWidth = h/85f
-//                var x = 0
-//                scores.forEachIndexed { index, fl ->
-//                    x = index
-//                    x *= 4
-//                    if(fl > 0.5){
-//                        paint.setColor(colors.get(index))
-//                        paint.style = Paint.Style.STROKE
-//                        canvas.drawRect(RectF(locations.get(x+1)*w, locations.get(x)*h, locations.get(x+3)*w, locations.get(x+2)*h), paint)
-//                        paint.style = Paint.Style.FILL
-//                        canvas.drawText(labels.get(classes.get(index).toInt())+" "+fl.toString(), locations.get(x+1)*w, locations.get(x)*h, paint)
-//                    }
-//                }
-//
-//                imageView.setImageBitmap(mutable)
-//
-//
-//            }
         }
 
         cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
@@ -148,6 +177,9 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         model.close()
+// if (::mediaPlayer.isInitialized) {
+// mediaPlayer.release()
+// }
     }
 
     @SuppressLint("MissingPermission")
@@ -186,6 +218,7 @@ class MainActivity : AppCompatActivity() {
             requestPermissions(arrayOf(Manifest.permission.CAMERA), 101)
         }
     }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
