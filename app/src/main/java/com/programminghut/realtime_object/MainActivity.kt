@@ -1,250 +1,174 @@
-package com.programminghut.realtime_object
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.*
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
-import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
-import android.os.Looper
-import android.renderscript.Element
 import android.util.Log
 import android.view.Surface
 import android.view.TextureView
 import android.widget.ImageView
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import com.programminghut.realtime_object.ml.SsdMobilenetV11Metadata1
+import com.programminghut.realtime_object.R
 import com.programminghut.realtime_object.ml.ModelStableV1
-import org.tensorflow.lite.DataType
+import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.support.common.FileUtil
 import org.tensorflow.lite.support.image.ImageProcessor
 import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.image.ops.ResizeOp
-
-import com.google.mlkit.vision.face.FaceDetection
-import com.google.mlkit.vision.face.FaceDetectorOptions
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.face.Face
-import android.graphics.Rect
+import java.text.SimpleDateFormat
 
 
 class MainActivity : AppCompatActivity() {
-    companion object {
-        private var index = 0
+
+    // ---------- Thuộc tính ----------
+    private lateinit var textureView: TextureView
+    private lateinit var imageView  : ImageView
+
+    private lateinit var cameraDevice: CameraDevice
+    private lateinit var cameraManager: CameraManager
+    private lateinit var handler     : Handler
+
+    private lateinit var faceDetector: FaceDetectorHelper
+    private lateinit var classifier  : ModelStableV1         // model drowsy/awake
+
+    private lateinit var imageProcessor: ImageProcessor
+
+    private val paintBox  = Paint().apply {
+        style = Paint.Style.STROKE; strokeWidth = 5f; color = Color.BLUE
+    }
+    private val paintText = Paint().apply {
+        style = Paint.Style.FILL; textSize = 60f; color = Color.WHITE
     }
 
-    lateinit var labels:List<String>
-    var colors = listOf<Int>(
-        Color.BLUE, Color.GREEN, Color.RED, Color.CYAN, Color.GRAY, Color.BLACK,
-        Color.DKGRAY, Color.MAGENTA, Color.YELLOW, Color.RED)
-    val paint = Paint()
-    lateinit var imageProcessor:ImageProcessor
-    lateinit var bitmap:Bitmap
-    lateinit var imageView:ImageView
-    lateinit var cameraDevice:CameraDevice
-    lateinit var handler:Handler
-    lateinit var cameraManager:CameraManager
-    lateinit var textureView:TextureView
-    lateinit var model:ModelStableV1
-    private var isNotifying = false
-    private val notifyThreshold = 0.5f
-    private val probabilityWindow = mutableListOf<Float>()
-    private val smoothingWindowSize = 10 // average over last 10 frames
     private val highThreshold = 0.7f
-    private val frameStates = mutableListOf<String>()
-    private var frameCounter = 0
 
-
-// lateinit var mediaPlayer: MediaPlayer
-
-
+    // ---------- Lifecycle ----------
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        get_permission()
 
-        labels = FileUtil.loadLabels(this, "labels.txt")
+        /* permission */
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.CAMERA), 1001)
+            return
+        }
+
+        /* View */
+        textureView = findViewById(R.id.textureView)
+        imageView   = findViewById(R.id.imageView)
+
+        /* Model load */
+        faceDetector = FaceDetectorHelper(this)
+        classifier   = ModelStableV1.newInstance(this)
+
         imageProcessor = ImageProcessor.Builder()
             .add(ResizeOp(224, 224, ResizeOp.ResizeMethod.BILINEAR))
             .build()
 
-// imageProcessor = ImageProcessor.Builder().add(ResizeOp(224, 224, ResizeOp.ResizeMethod.BILINEAR)).build()
-// model = SsdMobilenetV11Metadata1.newInstance(this)
-        model = ModelStableV1.newInstance(this)
-        val handlerThread = HandlerThread("videoThread")
-        handlerThread.start()
+        /* Camera thread */
+        val handlerThread = HandlerThread("cameraThread").apply { start() }
         handler = Handler(handlerThread.looper)
 
-        imageView = findViewById(R.id.imageView)
-
-        textureView = findViewById(R.id.textureView)
-        textureView.surfaceTextureListener = object:TextureView.SurfaceTextureListener{
-
-            override fun onSurfaceTextureAvailable(p0: SurfaceTexture, p1: Int, p2: Int) {
-                open_camera()
-            }
-            override fun onSurfaceTextureSizeChanged(p0: SurfaceTexture, p1: Int, p2: Int) {
-            }
-
-            override fun onSurfaceTextureDestroyed(p0: SurfaceTexture): Boolean {
-                return false
-            }
-            override fun onSurfaceTextureUpdated(p0: SurfaceTexture) {
-                // bitmap = textureView.bitmap!!
-                // var image = TensorImage.fromBitmap(bitmap)
-                // image = imageProcessor.process(image)
-
-                val startTime = System.currentTimeMillis()
-                val startTimeFormatted = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault()).format(java.util.Date())
-                Log.d("Timing", "Start frame at $startTimeFormatted")
-
-                bitmap = textureView.bitmap!!
-                var image = TensorImage(DataType.FLOAT32)
-                image.load(bitmap)
-                image = imageProcessor.process(image)
-
-                val inferenceStartTime = System.currentTimeMillis()
-                Log.d("Timing", "Start model inference: ${inferenceStartTime - startTime} ms after frame start")
-
-                val tensorBuffer = image.tensorBuffer
-                val outputs = model.process(tensorBuffer)
-                val probability = outputs.outputFeature0AsTensorBuffer.floatArray[0]
-
-                val endTime = System.currentTimeMillis() // End timing
-                Log.d("Timing", "Model finished inference: ${endTime - inferenceStartTime} ms (inference time)")
-                Log.d("Timing", "Total processing time: ${endTime - startTime} ms")
-                val delay = endTime - startTime
-
-                var mutable = bitmap.copy(Bitmap.Config.ARGB_8888, true)
-                val canvas = Canvas(mutable)
-
-                val h = mutable.height
-                val w = mutable.width
-                paint.textSize = h / 15f
-                paint.strokeWidth = h / 85f
-
-                val status = if (probability > highThreshold) "Drowsy" else "Awake"
-                Log.d("DinhThien", "Frame ${frameCounter + 1}: $status (${(probability * 100).toInt()}%)")
-
-                frameStates.add(status)
-                frameCounter++
-
-                if (frameCounter == 5) {
-                    val drowsyCount = frameStates.count { it == "Drowsy" }
-                    val awakeCount = frameStates.count { it == "Awake" }
-
-                    val finalState = if (drowsyCount >= 4) "Drowsy" else "Awake"
-                    Log.d("FinalState", "After 5 frames => Drowsy: $drowsyCount, Awake: $awakeCount → Final: $finalState")
-
-                    // Reset for next 5-frame window
-                    frameStates.clear()
-                    frameCounter = 0
-                }
-
-                paint.color = if (probability > highThreshold) Color.RED else Color.GREEN
-                paint.style = Paint.Style.FILL
-
-                canvas.drawText("$status : ${(probability * 100).toInt()}%", 50f, 100f, paint)
-
-                // 1. Add probability to sliding window and compute average
-                probabilityWindow.add(probability)
-                if (probabilityWindow.size > smoothingWindowSize) {
-                    probabilityWindow.removeAt(0)
-                }
-                val averageProbability = probabilityWindow.average().toFloat()
-
-                val currentTime = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault())
-                    .format(java.util.Date())
-                Log.d("FrameTime", "Current time: $currentTime")
-
-
-//                val status = if (averageProbability > highThreshold) "Drowsy" else "Awake"
-//                paint.color = if (averageProbability > highThreshold) Color.RED else Color.GREEN
-//                paint.style = Paint.Style.FILL
-//
-//                canvas.drawText("$status = ${(averageProbability * 100).toInt()}%", 50f, 100f, paint)
-
-                // TODO: Add media
-//                if (sustainedDrowsy && !isNotifying) {
-//                    isNotifying = true
-//
-//                    Handler(Looper.getMainLooper()).postDelayed({
-//                        if (probability > notifyThreshold) {
-//                        // if (!mediaPlayer.isPlaying) {
-//                        // mediaPlayer.start()
-//                        // }
-//                            Log.d("DrowsyWarning", "Warning Sleep! $status: ${(probability * 100).toInt()}%")
-//                        }
-//                        isNotifying = false
-//                    }, 1500)
-//                }
-                imageView.setImageBitmap(mutable)
-            }
-        }
-
+        textureView.surfaceTextureListener = surfaceCallback
         cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
-
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        model.close()
-// if (::mediaPlayer.isInitialized) {
-// mediaPlayer.release()
-// }
+        faceDetector.close()
+        classifier.close()
+    }
+
+    // ---------- Camera ----------
+    private val surfaceCallback = object : TextureView.SurfaceTextureListener {
+        override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) =
+            openCamera()
+        override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) = Unit
+        override fun onSurfaceTextureDestroyed(st: SurfaceTexture) = false
+        override fun onSurfaceTextureUpdated(st: SurfaceTexture) = processFrame()
     }
 
     @SuppressLint("MissingPermission")
-    fun open_camera(){
-        cameraManager.openCamera(cameraManager.cameraIdList[0], object:CameraDevice.StateCallback(){
-            override fun onOpened(p0: CameraDevice) {
-                cameraDevice = p0
+    private fun openCamera() {
+        val id = cameraManager.cameraIdList.first()      // lấy camera sau; đổi theo nhu cầu
+        cameraManager.openCamera(id, object : CameraDevice.StateCallback() {
+            override fun onOpened(device: CameraDevice) {
+                cameraDevice = device
+                val surface  = Surface(textureView.surfaceTexture)
+                val req      = cameraDevice.createCaptureRequest(
+                    CameraDevice.TEMPLATE_PREVIEW
+                ).apply { addTarget(surface) }
 
-                var surfaceTexture = textureView.surfaceTexture
-                var surface = Surface(surfaceTexture)
-
-                var captureRequest = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
-                captureRequest.addTarget(surface)
-
-                cameraDevice.createCaptureSession(listOf(surface), object: CameraCaptureSession.StateCallback(){
-                    override fun onConfigured(p0: CameraCaptureSession) {
-                        p0.setRepeatingRequest(captureRequest.build(), null, null)
-                    }
-                    override fun onConfigureFailed(p0: CameraCaptureSession) {
-                    }
-                }, handler)
+                cameraDevice.createCaptureSession(
+                    listOf(surface),
+                    object : CameraCaptureSession.StateCallback() {
+                        override fun onConfigured(sess: CameraCaptureSession) =
+                            sess.setRepeatingRequest(req.build(), null, handler)
+                        override fun onConfigureFailed(sess: CameraCaptureSession) = Unit
+                    },
+                    handler
+                )
             }
-
-            override fun onDisconnected(p0: CameraDevice) {
-
-            }
-
-            override fun onError(p0: CameraDevice, p1: Int) {
-
-            }
+            override fun onDisconnected(device: CameraDevice) = Unit
+            override fun onError(device: CameraDevice, err: Int) = Unit
         }, handler)
     }
 
-    fun get_permission(){
-        if(ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED){
-            requestPermissions(arrayOf(Manifest.permission.CAMERA), 101)
-        }
-    }
+    // ---------- Xử lý mỗi frame ----------
+    private fun processFrame() {
+        val original = textureView.bitmap ?: return
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if(grantResults[0] != PackageManager.PERMISSION_GRANTED){
-            get_permission()
+        /* 1. Detect face */
+        val detection = faceDetector.detect(original)
+        if (detection == null) {
+            imageView.setImageBitmap(original)           // không thấy mặt
+            return
         }
+        val faceRect = faceDetector.detectionToRect(detection, original)
+
+        /* 2. Crop mặt & tiền xử lý */
+        val cropped = Bitmap.createBitmap(
+            original,
+            faceRect.left, faceRect.top,
+            faceRect.width(), faceRect.height()
+        )
+        var tensor = TensorImage(DataType.FLOAT32).apply { load(cropped) }
+        tensor = imageProcessor.process(tensor)
+
+        /* 3. Phân loại */
+        val prob = classifier
+            .process(tensor.tensorBuffer)
+            .outputFeature0AsTensorBuffer.floatArray[0]
+
+        val status = if (prob > highThreshold) "Drowsy" else "Awake"
+
+        /* 4. Vẽ lên preview */
+        val mutable = original.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas  = Canvas(mutable)
+
+        canvas.drawRect(faceRect, paintBox)
+        paintText.color = if (prob > highThreshold) Color.RED else Color.GREEN
+        canvas.drawText(
+            "$status : ${(prob * 100).toInt()}%",
+            faceRect.left.toFloat(),
+            (faceRect.top - 20).coerceAtLeast(60f),
+            paintText
+        )
+
+        imageView.setImageBitmap(mutable)
     }
 }
