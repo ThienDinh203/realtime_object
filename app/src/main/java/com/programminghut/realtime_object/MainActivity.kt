@@ -20,7 +20,7 @@ import android.view.TextureView
 import android.widget.ImageView
 import androidx.core.content.ContextCompat
 import com.programminghut.realtime_object.ml.SsdMobilenetV11Metadata1
-import com.programminghut.realtime_object.ml.Model
+import com.programminghut.realtime_object.ml.ModelStableV1
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.support.common.FileUtil
 import org.tensorflow.lite.support.image.ImageProcessor
@@ -35,6 +35,9 @@ import android.graphics.Rect
 
 
 class MainActivity : AppCompatActivity() {
+    companion object {
+        private var index = 0
+    }
 
     lateinit var labels:List<String>
     var colors = listOf<Int>(
@@ -48,14 +51,15 @@ class MainActivity : AppCompatActivity() {
     lateinit var handler:Handler
     lateinit var cameraManager:CameraManager
     lateinit var textureView:TextureView
-    lateinit var model:Model
+    lateinit var model:ModelStableV1
     private var isNotifying = false
     private val notifyThreshold = 0.5f
     private val probabilityWindow = mutableListOf<Float>()
     private val smoothingWindowSize = 10 // average over last 10 frames
     private val highThreshold = 0.7f
-    private var drowsyStartTime: Long = 0
-    private val drowsyDurationThreshold = 2000L // 2 seconds
+    private val frameStates = mutableListOf<String>()
+    private var frameCounter = 0
+
 
 // lateinit var mediaPlayer: MediaPlayer
 
@@ -72,7 +76,7 @@ class MainActivity : AppCompatActivity() {
 
 // imageProcessor = ImageProcessor.Builder().add(ResizeOp(224, 224, ResizeOp.ResizeMethod.BILINEAR)).build()
 // model = SsdMobilenetV11Metadata1.newInstance(this)
-        model = Model.newInstance(this)
+        model = ModelStableV1.newInstance(this)
         val handlerThread = HandlerThread("videoThread")
         handlerThread.start()
         handler = Handler(handlerThread.looper)
@@ -81,6 +85,7 @@ class MainActivity : AppCompatActivity() {
 
         textureView = findViewById(R.id.textureView)
         textureView.surfaceTextureListener = object:TextureView.SurfaceTextureListener{
+
             override fun onSurfaceTextureAvailable(p0: SurfaceTexture, p1: Int, p2: Int) {
                 open_camera()
             }
@@ -91,21 +96,29 @@ class MainActivity : AppCompatActivity() {
                 return false
             }
             override fun onSurfaceTextureUpdated(p0: SurfaceTexture) {
-// bitmap = textureView.bitmap!!
-// var image = TensorImage.fromBitmap(bitmap)
-// image = imageProcessor.process(image)
+                // bitmap = textureView.bitmap!!
+                // var image = TensorImage.fromBitmap(bitmap)
+                // image = imageProcessor.process(image)
+
                 val startTime = System.currentTimeMillis()
+                val startTimeFormatted = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault()).format(java.util.Date())
+                Log.d("Timing", "Start frame at $startTimeFormatted")
 
                 bitmap = textureView.bitmap!!
-                var image = TensorImage(DataType.FLOAT32) // Sử dụng FLOAT32 thay vì mặc định
+                var image = TensorImage(DataType.FLOAT32)
                 image.load(bitmap)
                 image = imageProcessor.process(image)
+
+                val inferenceStartTime = System.currentTimeMillis()
+                Log.d("Timing", "Start model inference: ${inferenceStartTime - startTime} ms after frame start")
 
                 val tensorBuffer = image.tensorBuffer
                 val outputs = model.process(tensorBuffer)
                 val probability = outputs.outputFeature0AsTensorBuffer.floatArray[0]
 
                 val endTime = System.currentTimeMillis() // End timing
+                Log.d("Timing", "Model finished inference: ${endTime - inferenceStartTime} ms (inference time)")
+                Log.d("Timing", "Total processing time: ${endTime - startTime} ms")
                 val delay = endTime - startTime
 
                 var mutable = bitmap.copy(Bitmap.Config.ARGB_8888, true)
@@ -116,8 +129,28 @@ class MainActivity : AppCompatActivity() {
                 paint.textSize = h / 15f
                 paint.strokeWidth = h / 85f
 
-                val status = if (probability > 0.5) "Drowsy" else "Awake"
-                paint.color = if (probability > 0.5) Color.RED else Color.GREEN
+                val status = if (probability > highThreshold) "Drowsy" else "Awake"
+                Log.d("DinhThien", "Frame ${frameCounter + 1}: $status (${(probability * 100).toInt()}%)")
+
+                frameStates.add(status)
+                frameCounter++
+
+                if (frameCounter == 5) {
+                    val drowsyCount = frameStates.count { it == "Drowsy" }
+                    val awakeCount = frameStates.count { it == "Awake" }
+
+                    val finalState = if (drowsyCount >= 4) "Drowsy" else "Awake"
+                    Log.d("FinalState", "After 5 frames => Drowsy: $drowsyCount, Awake: $awakeCount → Final: $finalState")
+
+                    // Reset for next 5-frame window
+                    frameStates.clear()
+                    frameCounter = 0
+                }
+
+                paint.color = if (probability > highThreshold) Color.RED else Color.GREEN
+                paint.style = Paint.Style.FILL
+
+                canvas.drawText("$status : ${(probability * 100).toInt()}%", 50f, 100f, paint)
 
                 // 1. Add probability to sliding window and compute average
                 probabilityWindow.add(probability)
@@ -126,46 +159,31 @@ class MainActivity : AppCompatActivity() {
                 }
                 val averageProbability = probabilityWindow.average().toFloat()
 
-// 2. Determine state using smoothed average and higher threshold
-                val isDrowsy = averageProbability > highThreshold
-                val currentTime = System.currentTimeMillis()
+                val currentTime = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault())
+                    .format(java.util.Date())
+                Log.d("FrameTime", "Current time: $currentTime")
 
-// 3. Track duration of drowsy state
-                if (isDrowsy) {
-                    if (drowsyStartTime == 0L) {
-                        drowsyStartTime = currentTime
-                    }
-                } else {
-                    drowsyStartTime = 0L
-                }
 
-                val sustainedDrowsy = drowsyStartTime != 0L && (currentTime - drowsyStartTime >= drowsyDurationThreshold)
+//                val status = if (averageProbability > highThreshold) "Drowsy" else "Awake"
+//                paint.color = if (averageProbability > highThreshold) Color.RED else Color.GREEN
+//                paint.style = Paint.Style.FILL
+//
+//                canvas.drawText("$status = ${(averageProbability * 100).toInt()}%", 50f, 100f, paint)
 
-//                val status = if (sustainedDrowsy) "Drowsy" else "Awake"
-//                paint.color = if (sustainedDrowsy) Color.RED else Color.GREEN
-
-                paint.style = Paint.Style.FILL
-
-                canvas.drawText("$status: ${(averageProbability * 100).toInt()}%", 50f, 100f, paint)
-
-                paint.color = Color.WHITE
-                paint.textSize = h / 50f
-                canvas.drawText("Delay: ${delay}ms", 50f, 150f, paint)
-                Log.d("InferenceTime", "Model inference delay: ${delay}ms")
-
-                if (sustainedDrowsy && !isNotifying) {
-                    isNotifying = true
-
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        if (probability > notifyThreshold) {
-                        // if (!mediaPlayer.isPlaying) {
-                        // mediaPlayer.start()
-                        // }
-                            Log.d("DrowsyWarning", "Warning Sleep! $status: ${(probability * 100).toInt()}%")
-                        }
-                        isNotifying = false
-                    }, 1500)
-                }
+                // TODO: Add media
+//                if (sustainedDrowsy && !isNotifying) {
+//                    isNotifying = true
+//
+//                    Handler(Looper.getMainLooper()).postDelayed({
+//                        if (probability > notifyThreshold) {
+//                        // if (!mediaPlayer.isPlaying) {
+//                        // mediaPlayer.start()
+//                        // }
+//                            Log.d("DrowsyWarning", "Warning Sleep! $status: ${(probability * 100).toInt()}%")
+//                        }
+//                        isNotifying = false
+//                    }, 1500)
+//                }
                 imageView.setImageBitmap(mutable)
             }
         }
